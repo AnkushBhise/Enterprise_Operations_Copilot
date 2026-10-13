@@ -222,3 +222,4 @@ __marimo__/
 # excluded
 .*/
 
+.DS_Store
