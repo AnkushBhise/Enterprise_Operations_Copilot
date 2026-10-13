@@ -38,7 +38,8 @@ The system must:
 | Observability | Langfuse | Traces, latency, tool calls, failures, token usage, cost |
 | Frontend | Ready-made chat UI (e.g. Chainlit) | Simple chat box with streamed progress and approve/reject buttons; no custom frontend |
 | Packaging | Docker + Docker Compose | Full stack from one entrypoint |
-| Optional | Hugging Face datasets, Redis, RQ/Celery | Added only if they simplify the design |
+| Redis | Redis | Rate-limit and budget counters, shared circuit-breaker state |
+| Optional | Hugging Face datasets, RQ/Celery | Added only if they simplify the design |
 
 PostgreSQL and PGVector run in a container (`pgvector/pgvector` image) so the stack stays portable.
 
@@ -163,7 +164,7 @@ Captured and inspectable: model calls, retrieval steps, tool calls and failures,
 ## 13. Deployment
 
 - `Dockerfile` and `docker-compose.yml`; `docker compose up --build` brings up the stack.
-- Services: app (API), worker, PostgreSQL with PGVector, Langfuse (and its dependencies), optional Redis.
+- Services: app (API), worker, PostgreSQL with PGVector, Langfuse (and its dependencies), Redis.
 - Health and readiness endpoints; documented verification steps.
 - `.env.example` with all configuration; no manual wiring beyond supplying secrets.
 
@@ -187,7 +188,7 @@ Captured and inspectable: model calls, retrieval steps, tool calls and failures,
 ## 16. Open Questions
 
 1. Frontend tool: choose a ready-made chat UI (Chainlit is the leading candidate; alternatives are Gradio and Streamlit).
-2. Background execution: Postgres job table plus worker, or Redis with RQ/Celery.
+2. Background execution: decided, Postgres job table plus worker (see design.md 4.9).
 3. Langfuse: self-hosted in Compose or cloud.
 4. Authentication placement: API gateway level or inside the application.
 5. Mapping of BANKING77 intents to department, priority, and risk level.
