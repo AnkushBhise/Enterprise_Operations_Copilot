@@ -156,3 +156,65 @@ Targets are proposals to be confirmed during evaluation design.
 - Decide the role of the Enron corpus (data pipeline design).
 - Confirm the intent subset and the mapping of BANKING77 intents to department, priority, and risk.
 - Define how roles are assigned to users (identity decision).
+
+## 2. User Interface and Authentication
+
+### 2.1 Approach
+
+A ready-made chat UI, with no custom frontend. The UI exists to exercise the platform; the FastAPI backend is the product.
+
+**Tool: Chainlit.** It provides a chat box with streamed output and visible intermediate steps, a sidebar of past conversations, a login screen, and action buttons, all without frontend code.
+
+### 2.2 Screen
+
+- **Chat area:** text input and streamed responses. Progress steps appear as they happen (classification, retrieval, tool calls, waiting for approval, completion).
+- **Left sidebar:** past conversations, each tied to a session or case.
+- **Pending approvals:** a manager sees pending items with approve and reject buttons, inline in the chat.
+- **Background jobs:** running and finished jobs appear as progress messages in the conversation.
+- **Identity:** the logged-in user's name and role are shown.
+
+### 2.3 Authentication
+
+**Password login against a seeded `users` table.**
+
+- Four demo users, one per role (support, compliance, operations, manager), with hashed passwords and a stored role.
+- Chainlit's password callback validates credentials against Postgres.
+- The role decides which tools and data the user can reach, and whether they can approve.
+- Seeded users make role switching easy, which is needed to demonstrate permissions and approvals.
+
+**Why not OAuth now:** it needs an external OAuth app, client secrets, internet access, and a real account per demo user, which conflicts with a one-command start. The API only receives `user_id` and `role`, so OAuth or SSO can replace the login callback later without touching the backend.
+
+### 2.4 UI to API trust
+
+- The UI runs as its own container and calls FastAPI over HTTP and SSE.
+- After login, the UI calls the API with a shared secret plus `user_id` and `role` headers. The API accepts only calls that carry the secret.
+- This is not production identity; the production design (signed tokens issued by an identity provider) is described in the write-up.
+
+### 2.5 Conversation history
+
+- Chainlit stores conversation history in the same PostgreSQL instance, in a separate schema.
+- A Chainlit thread maps one-to-one to a `sessions` row and the LangGraph checkpoint `thread_id`, so history is not kept twice.
+
+### 2.6 Pending approvals
+
+The approver is a different person from the requester, so approvals cannot depend on a button inside the requester's conversation. Approvals live in the database and are exposed by the API (`GET /approvals?status=pending`, `POST /approvals/{id}/decision`).
+
+- **Manager view:** a `/approvals` command lists pending items, each with Approve and Reject buttons and the evidence needed to decide. At login (and on opening a chat), a message such as "You have N pending approvals" links to the same list.
+- **Requester view:** the conversation shows "waiting for approval" and is updated with the decision when it arrives.
+- **Fallback:** Chainlit's left sidebar is not extensible to my knowledge. A short spike confirms what is possible; if `/approvals` or its buttons hit a limit, approvals appear inline in the manager's open chat.
+
+### 2.7 Conversation management
+
+Past conversations are listed and reopened only. Delete and rename are not supported in this phase.
+
+### 2.8 Job progress and returning users
+
+- Each job writes an append-only `job_events` stream (sequence number, stage, message, timestamp). The job's final result and any failure details are stored on the job record.
+- The stream endpoint accepts "events after N": it replays missed events, then continues live.
+- When a past conversation is opened, the UI lists the jobs linked to its thread, re-attaches to running ones, and renders results of finished ones.
+- A `/jobs` command lists the user's recent jobs and their status.
+- The worker cannot push into a conversation the user is not viewing, so results are delivered on the next open.
+
+### 2.9 Decision notification
+
+When a manager decides, the workflow resumes immediately. The requester sees the decision live if the conversation is open, otherwise when it is next opened. Out-of-band notification (email, push) is out of scope for this phase.
