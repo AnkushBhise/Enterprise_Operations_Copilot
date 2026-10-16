@@ -221,5 +221,6 @@ __marimo__/
 
 # excluded
 .*/
+CLAUDE*
 
 .DS_Store
