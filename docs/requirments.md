@@ -35,11 +35,15 @@ The system must:
 | API | FastAPI | Request, streaming, approval, job status, and health endpoints |
 | LLM and embeddings | OpenAI API | Reasoning, generation, embeddings (`text-embedding-3-small` by default) |
 | Database and vector store | PostgreSQL + PGVector | Embeddings, metadata, memory, cases, approvals, jobs, checkpoints |
-| Observability | Langfuse | Traces, latency, tool calls, failures, token usage, cost |
-| Frontend | Ready-made chat UI (e.g. Chainlit) | Simple chat box with streamed progress and approve/reject buttons; no custom frontend |
+| Observability | Langfuse Cloud (Hobby tier) | Traces, latency, tool calls, failures, token usage, cost |
+| Frontend | Chainlit | Simple chat box with streamed progress and approve/reject buttons; no custom frontend |
+| Infrastructure as code | AWS CDK (Python) | Every AWS resource created through code, never the console |
+| Identity | AWS Cognito (Keycloak as documented backup) | OAuth/OIDC login, roles as groups, machine identities |
+| Tool gateway | Own thin FastAPI service, tools as an MCP server | Single point for authorization, validation, resilience, and audit of every tool call and retrieval |
 | Packaging | Docker + Docker Compose | Full stack from one entrypoint |
 | Redis | Redis | Rate-limit and budget counters, shared circuit-breaker state |
-| Optional | Hugging Face datasets, RQ/Celery | Added only if they simplify the design |
+| Optional | Hugging Face datasets | Loading BANKING77 |
+| Production option | Microsoft Presidio | Rules-first PII detection in front of the LLM guard classifier; evaluated before production, not used in the prototype |
 
 PostgreSQL and PGVector run in a container (`pgvector/pgvector` image) so the stack stays portable.
 
@@ -70,7 +74,8 @@ All agents are coordinated through a single LangGraph graph. Each boundary must 
 ### 6.1 Routing dataset — BANKING77
 
 - Load with `load_dataset("PolyAI/banking77")`; convert train and test splits to structured records.
-- Normalize to: `query_id, user_query, intent_label, priority, department, risk_level`.
+- Normalize to: `query_id, user_query, intent_label, priority, department, risk_level`, plus `expected_path`.
+- Each query is wrapped as an employee request (for example "Customer on ticket T-1042 says: '...'. Help me handle this."), because the copilot's users are employees and the dataset sentences are in a customer's voice.
 - Priority, department, and risk level are not in the source data. Define an explicit mapping from the 77 intents and record it as a versioned file.
 - Used for routing tests, intent classification, and supervisor benchmarking.
 
@@ -108,23 +113,31 @@ Minimum schema:
 
 - `documents` — source-level records and version info.
 - `document_chunks` — `chunk_text`, metadata, embedding vector.
+- `user_profiles` — team and assignment data keyed by Cognito `sub` (identities and roles live in Cognito).
 - `sessions` — session identity, owner, conversation summary.
 - `cases` — case state and extracted entities.
-- `approvals` — pending action, status (pending / approved / rejected / expired), decider, timestamps.
-- `jobs` — background job state, progress, errors.
+- `approvals` — pending action, status (pending / approved / rejected / expired / executed / execution_failed), decider, timestamps.
+- `jobs` and `job_events` — background job state, queue, append-only progress events, errors.
+- `tool_calls` — full tool inputs and outputs, referenced from graph state.
+- `drafts` — drafted customer and internal messages.
+- `audit_log` — append-only record of actions and decisions.
 - LangGraph checkpoint tables.
+- Mock enterprise data (tickets, ledger, org directory) and Chainlit history in separate schemas.
 
 Short-term memory is the conversation and checkpointed graph state per `thread_id`. Long-term memory is case history, summaries, and extracted entities per user and case.
 
 ## 8. Tools
 
-At least five approved tools, with schema-validated inputs and structured, recoverable outputs:
+Six approved tools, with schema-validated inputs and structured, recoverable outputs:
 
 1. Ticket lookup.
-2. Policy lookup.
-3. Organization lookup.
-4. Approval submission.
-5. Notification / draft creation.
+2. Transaction lookup (orders, payments, refunds).
+3. Policy lookup.
+4. Organization lookup.
+5. Approval submission (performed by the Approval agent, not chosen by the LLM).
+6. Notification / draft creation.
+
+Approved actions (refund, send communication, policy exception, account flag) run through internal executors that the LLM cannot call.
 
 Requirements: retries with backoff, explicit failure reporting, graceful handling of unavailable services, no unrestricted tool access (allow-list per workflow).
 
@@ -134,7 +147,7 @@ Requirements: retries with backoff, explicit failure reporting, graceful handlin
 - Job state and progress persist in the database and survive restarts.
 - High-risk actions pause the graph; the pending action and approval state are persisted.
 - Approval decisions (approve, reject, expire) are recorded with decider and time, and resume the workflow accordingly.
-- Streaming (SSE) covers: request classification, retrieval, tool execution, waiting for approval, background progress, and completion, in addition to answer tokens.
+- Streaming (SSE) covers: request classification, retrieval, tool execution, composing, waiting for approval, background progress, and completion. The answer is sent after the output guard passes (sentence by sentence), not as raw tokens, so unchecked content never reaches the user.
 
 ## 10. Guardrails and Security
 
@@ -146,7 +159,7 @@ Requirements: retries with backoff, explicit failure reporting, graceful handlin
 - Policy and compliance checks before any action proceeds.
 - Retrieved documents and tool responses treated as untrusted input.
 - Audit-friendly logs and evidence traces.
-- Identity: a `user_id` supplied at the API boundary scopes memory and approvals. Full identity and access management is out of scope for this phase.
+- Identity: users log in through AWS Cognito; the API verifies the access token and takes identity and roles only from it. The copilot acts as the user: every tool call and retrieval is authorized as that user by the tool gateway.
 - A deployment design for AWS (managed guardrails, PII services, secrets management, network controls) is documented in the architecture write-up.
 
 ## 11. Observability
@@ -164,7 +177,7 @@ Captured and inspectable: model calls, retrieval steps, tool calls and failures,
 ## 13. Deployment
 
 - `Dockerfile` and `docker-compose.yml`; `docker compose up --build` brings up the stack.
-- Services: app (API), worker, PostgreSQL with PGVector, Langfuse (and its dependencies), Redis.
+- Services: app (API), UI (Chainlit), worker, tool gateway, MCP tool server, mock backend, PostgreSQL with PGVector, Redis. Langfuse and Cognito are cloud services; their settings are supplied in `.env`.
 - Health and readiness endpoints; documented verification steps.
 - `.env.example` with all configuration; no manual wiring beyond supplying secrets.
 
@@ -187,10 +200,10 @@ Captured and inspectable: model calls, retrieval steps, tool calls and failures,
 
 ## 16. Open Questions
 
-1. Frontend tool: choose a ready-made chat UI (Chainlit is the leading candidate; alternatives are Gradio and Streamlit).
+1. Frontend tool: decided, Chainlit (see design.md 2.1).
 2. Background execution: decided, Postgres job table plus worker (see design.md 4.9).
-3. Langfuse: self-hosted in Compose or cloud.
-4. Authentication placement: API gateway level or inside the application.
+3. Langfuse: decided, Langfuse Cloud (see design.md 4.11).
+4. Authentication placement: decided. The API verifies the user's token (inbound); the tool gateway authorizes every tool call and retrieval as the user (see design.md section 5).
 5. Mapping of BANKING77 intents to department, priority, and risk level.
 
 ## 17. Work Plan
@@ -198,8 +211,8 @@ Captured and inspectable: model calls, retrieval steps, tool calls and failures,
 Design (keep each design doc short; revise after the thin slice runs)
 
 - [x] List the work in priority order.
-- [ ] Define the use case and high- and low-level objectives.
-- [ ] Choose a ready-made chat UI and define the minimal user experience (see section 18).
+- [x] Define the use case and high- and low-level objectives.
+- [x] Choose a ready-made chat UI and define the minimal user experience (see section 18).
 - [ ] Decide identity handling (`user_id` scoping, where auth lives).
 - [ ] Define workflows, agents, tool contracts (schemas, failure modes, allow-lists), and the full graph on paper.
 - [ ] Define memory storage (short-term versus long-term, schema) and knowledge base storage (schema).
@@ -219,7 +232,7 @@ Data (start early, in parallel with design)
 
 Build
 
-- [ ] Compose baseline: app, worker, PostgreSQL / PGVector, Langfuse, health endpoints, `.env.example`.
+- [ ] Compose baseline: app, UI, worker, mock backend, PostgreSQL / PGVector, Redis, health endpoints, `.env.example` (Langfuse Cloud keys).
 - [ ] Thin end-to-end slice: stubbed graph, one request through API, graph, database, and traces.
 - [ ] Ingestion pipeline; test update handling.
 - [ ] Retrieval with metadata filters and evidence tracing.
@@ -244,6 +257,6 @@ The UI is a means to exercise the system, not a deliverable in itself. Use an of
 
 - A chat box with streamed responses.
 - Progress messages shown as they arrive (classification, retrieval, tool calls, waiting for approval, background job status).
-- Approve and reject buttons when a workflow is waiting for approval.
+- Managers open pending approvals with an `/approvals` command and decide with Approve and Reject buttons.
 - A way to see background job status.
 - Runs as one more container in Compose.
